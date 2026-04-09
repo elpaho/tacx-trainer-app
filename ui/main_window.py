@@ -927,6 +927,124 @@ class SlopePanelWidget(QWidget):
             f"ref {self._ref_power} W  ±{self._tolerance} W"
         )
 
+class BalanceWidget(QWidget):
+    """
+    Prikaz L/R balance i pedal smoothness.
+    Gornji dio: horizontalna traka koja vizualno prikazuje omjer L/R.
+    Donji dio: smoothness za lijevu i desnu nogu.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._balance_left: float = 0.0   # 0 = nema podatka
+        self._smooth_left: float = 0.0
+        self._smooth_right: float = 0.0
+        self.setFixedHeight(62)
+
+    def update_data(self, balance_left: float, smooth_left: float, smooth_right: float):
+        if (balance_left != self._balance_left or
+                smooth_left != self._smooth_left or
+                smooth_right != self._smooth_right):
+            self._balance_left = balance_left
+            self._smooth_left = smooth_left
+            self._smooth_right = smooth_right
+            self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QFont
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+
+        no_data = self._balance_left <= 0.0
+        bal_l = self._balance_left if not no_data else 50.0
+        bal_r = 100.0 - bal_l
+
+        font_sm = QFont()
+        font_sm.setPixelSize(9)
+        font_md = QFont("Courier New")
+        font_md.setPixelSize(11)
+        font_md.setBold(True)
+
+        # ── L/R Balance traka ──────────────────────────────────────
+        bar_y = 4
+        bar_h = 16
+        lbl_w = 20   # prostor za "L" i "R" labele sa strane
+        pct_w = 28   # prostor za postotak s lijeve i desne strane
+        bar_x = lbl_w + pct_w
+        bar_w = W - 2 * (lbl_w + pct_w)
+
+        # pozadina trake
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#1e2230"))
+        painter.drawRoundedRect(bar_x, bar_y, bar_w, bar_h, 4, 4)
+
+        if not no_data:
+            split_x = int(bar_w * bal_l / 100.0)
+            # lijeva strana — plava
+            painter.setBrush(QColor("#378ADD"))
+            painter.drawRoundedRect(bar_x, bar_y, split_x, bar_h, 4, 4)
+            # desna strana — narančasta
+            painter.setBrush(QColor("#c8a84b"))
+            painter.drawRoundedRect(bar_x + split_x, bar_y, bar_w - split_x, bar_h, 4, 4)
+            # sredinska linija
+            painter.setPen(QPen(QColor("#0e1015"), 2))
+            mid = bar_x + bar_w // 2
+            painter.drawLine(mid, bar_y + 2, mid, bar_y + bar_h - 2)
+        else:
+            # nema podatka — prikaži crtice
+            painter.setPen(QColor("#3a4050"))
+            painter.setFont(font_sm)
+            painter.drawText(bar_x, bar_y, bar_w, bar_h,
+                             Qt.AlignmentFlag.AlignCenter, "—")
+
+        # L label i postotak lijevo
+        painter.setPen(QColor("#378ADD") if not no_data else QColor("#3a4050"))
+        painter.setFont(font_sm)
+        painter.drawText(0, bar_y, lbl_w, bar_h, Qt.AlignmentFlag.AlignCenter, "L")
+        painter.setFont(font_md)
+        l_str = f"{bal_l:.0f}%" if not no_data else "—"
+        painter.drawText(lbl_w, bar_y, pct_w, bar_h,
+                         Qt.AlignmentFlag.AlignCenter, l_str)
+
+        # R label i postotak desno
+        painter.setPen(QColor("#c8a84b") if not no_data else QColor("#3a4050"))
+        painter.setFont(font_sm)
+        painter.drawText(W - lbl_w, bar_y, lbl_w, bar_h, Qt.AlignmentFlag.AlignCenter, "R")
+        painter.setFont(font_md)
+        r_str = f"{bal_r:.0f}%" if not no_data else "—"
+        painter.drawText(W - lbl_w - pct_w, bar_y, pct_w, bar_h,
+                         Qt.AlignmentFlag.AlignCenter, r_str)
+
+        # ── Smoothness ─────────────────────────────────────────────
+        sm_y = bar_y + bar_h + 6
+        sm_h = H - sm_y - 4
+        sm_bar_w = (bar_w - 6) // 2
+
+        for side, val, color, x_off in [
+            ("L smooth", self._smooth_left,  "#378ADD", bar_x),
+            ("R smooth", self._smooth_right, "#c8a84b", bar_x + sm_bar_w + 6),
+        ]:
+            has_val = val > 0.0
+            # pozadina
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#1e2230"))
+            painter.drawRoundedRect(x_off, sm_y, sm_bar_w, sm_h, 3, 3)
+            # fill
+            if has_val:
+                fill_w = max(3, int(sm_bar_w * val / 100.0))
+                c = QColor(color)
+                c.setAlphaF(0.75)
+                painter.setBrush(c)
+                painter.drawRoundedRect(x_off, sm_y, fill_w, sm_h, 3, 3)
+            # tekst
+            painter.setPen(QColor(color) if has_val else QColor("#3a4050"))
+            painter.setFont(font_sm)
+            val_str = f"{val:.0f}%" if has_val else "—"
+            painter.drawText(x_off, sm_y, sm_bar_w, sm_h,
+                             Qt.AlignmentFlag.AlignCenter, val_str)
+
+
 class PowerHrChart(QWidget):
     """
     Rolling graf snage (plava) i HR (crvena).
@@ -1548,6 +1666,19 @@ class MainWindow(QMainWindow):
         hr_lay.addWidget(self.hr_zone_bar)
         lay.addWidget(hr_frame)
 
+        # L/R Balance + Smoothness kutija
+        bal_frame = QFrame()
+        bal_frame.setObjectName("ftpBox")
+        bal_lay = QVBoxLayout(bal_frame)
+        bal_lay.setContentsMargins(6, 4, 6, 4)
+        bal_lay.setSpacing(2)
+        bal_title = QLabel("L/R BALANS")
+        bal_title.setStyleSheet("font-size: 9px; color: #3a4050; letter-spacing: 2px;")
+        self.balance_widget = BalanceWidget()
+        bal_lay.addWidget(bal_title)
+        bal_lay.addWidget(self.balance_widget)
+        lay.addWidget(bal_frame)
+
         intervals_btn_row = QHBoxLayout()
         self.intervals_connect_btn = QPushButton("Poveži ↗")
         self.intervals_connect_btn.setStyleSheet("font-size: 11px;")
@@ -1747,6 +1878,10 @@ class MainWindow(QMainWindow):
             self._apply_zone_colors(pwr, hr)
         # slope panel svaki tick — mora reagirati odmah
         self._update_slope_panel()
+        # balance + smoothness
+        self.balance_widget.update_data(
+            m.balance_left, m.smoothness_left, m.smoothness_right
+        )
 
     def _update_timebar(self):
         from datetime import datetime

@@ -30,6 +30,11 @@ class MetricsData:
     target_power: int = 0
     target_grade: float = 0.0
 
+    # Pedal balance i smoothness (iz CPS karakteristike)
+    balance_left: float = 0.0    # % lijeva noga (0 = nema podatka)
+    smoothness_left: float = 0.0   # % glatkoća lijeva (0 = nema podatka)
+    smoothness_right: float = 0.0  # % glatkoća desna (0 = nema podatka)
+
 
 @dataclass
 class WorkoutInterval:

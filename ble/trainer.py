@@ -42,6 +42,11 @@ class TacxTrainer:
         self._speed: float = 0.0
         self._target_power: int = 0
 
+        # L/R balance i smoothness iz CPS
+        self._balance_left: float = 0.0
+        self._smoothness_left: float = 0.0
+        self._smoothness_right: float = 0.0
+
         # 3s rolling buffer za snagu
         self._power_buf: deque = deque([0, 0, 0], maxlen=3)
 
@@ -69,6 +74,13 @@ class TacxTrainer:
             # FEC page 16 daje brzinu
             await self._client.start_notify(FEC_NOTIFY, self._on_fec_notification)
             logger.info("FEC notify OK")
+
+            # CPS — L/R balance i pedal smoothness (ako trenažer podržava)
+            try:
+                await self._client.start_notify(CPS_POWER, self._on_cps_power)
+                logger.info("CPS notify OK")
+            except Exception as e:
+                logger.warning(f"CPS notify nije dostupan: {e}")
 
             self._set_state(ConnectionState.CONNECTED)
             self._emit_task = asyncio.ensure_future(self._emit_loop())
@@ -105,6 +117,9 @@ class TacxTrainer:
                 speed=self._speed,
                 interval_avg_power=int_avg_pw,
                 target_power=self._target_power,
+                balance_left=self._balance_left,
+                smoothness_left=self._smoothness_left,
+                smoothness_right=self._smoothness_right,
             )
             if self.on_metrics:
                 self.on_metrics(metrics)
@@ -161,8 +176,86 @@ class TacxTrainer:
     # ------------------------------------------------------------------ callbacks
 
     def _on_cps_power(self, sender, data: bytearray):
-        """Nije više u upotrebi — sve dolazi iz FEC."""
-        pass
+        """
+        CPS 0x2a63 — Cycling Power Measurement.
+        Parsira L/R balance i pedal smoothness ako su dostupni u paketu.
+
+        CPS flags (bytes 0-1):
+          bit 0: Pedal Power Balance Present
+          bit 1: Pedal Power Balance Reference (0=unknown, 1=left)
+          bit 2: Accumulated Torque Present
+          bit 3: Accumulated Torque Source
+          bit 4: Wheel Revolution Data Present
+          bit 5: Crank Revolution Data Present
+          bit 6: Extreme Force Magnitudes Present
+          bit 7: Extreme Torque Magnitudes Present
+          bit 8: Extreme Angles Present
+          bit 9: Top Dead Spot Angle Present
+          bit 10: Bottom Dead Spot Angle Present
+          bit 11: Accumulated Energy Present
+          bit 12: Offset Compensation Indicator
+          bit 13: Left/Right Pedal Smoothness Present (oba zajedno)
+        """
+        if len(data) < 4:
+            return
+
+        flags = int.from_bytes(data[0:2], "little")
+        offset = 4  # preskačemo flags (2) i instantaneous power (2)
+
+        # Pedal Power Balance (bit 0)
+        if flags & 0x0001:
+            if offset < len(data):
+                raw_balance = data[offset]
+                # vrijednost je u 0.5% koracima, referenca je lijeva noga
+                self._balance_left = raw_balance * 0.5
+                offset += 1
+
+        # Accumulated Torque (bit 2) — preskačemo, 2 bajta
+        if flags & 0x0004:
+            offset += 2
+
+        # Wheel Revolution Data (bit 4) — preskačemo, 6 bajta
+        if flags & 0x0010:
+            offset += 6
+
+        # Crank Revolution Data (bit 5) — preskačemo, 4 bajta
+        if flags & 0x0020:
+            offset += 4
+
+        # Extreme Force Magnitudes (bit 6) — preskačemo, 4 bajta
+        if flags & 0x0040:
+            offset += 4
+
+        # Extreme Torque Magnitudes (bit 7) — preskačemo, 4 bajta
+        if flags & 0x0080:
+            offset += 4
+
+        # Extreme Angles (bit 8) — preskačemo, 3 bajta
+        if flags & 0x0100:
+            offset += 3
+
+        # Top Dead Spot Angle (bit 9) — preskačemo, 2 bajta
+        if flags & 0x0200:
+            offset += 2
+
+        # Bottom Dead Spot Angle (bit 10) — preskačemo, 2 bajta
+        if flags & 0x0400:
+            offset += 2
+
+        # Accumulated Energy (bit 11) — preskačemo, 2 bajta
+        if flags & 0x0800:
+            offset += 2
+
+        # Left/Right Pedal Smoothness (bit 13) — svaki po 1 bajt, u 0.5% koracima
+        if flags & 0x2000:
+            if offset + 1 < len(data):
+                raw_l = data[offset]
+                raw_r = data[offset + 1]
+                # 0xFF = vrijednost nije dostupna
+                if raw_l != 0xFF:
+                    self._smoothness_left = raw_l * 0.5
+                if raw_r != 0xFF:
+                    self._smoothness_right = raw_r * 0.5
 
     def _on_cps_crank(self, sender, data: bytearray):
         """Nije više u upotrebi — sve dolazi iz FEC."""
