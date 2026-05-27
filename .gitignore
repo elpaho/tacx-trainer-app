@@ -1,7 +1,20 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-.env
-*.zip
-venv/
-.venv/
+*.pyd
+
+# VS Code
+.vscode/
+
+# Lokalna konfiguracija (sadrži API keyeve — nikad ne commitaj!)
+intervals_config.json
+~/.tacx_app/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Privremeni fajlovi
+*.tmp
+tacx_app_update.zip

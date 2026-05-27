@@ -24,28 +24,45 @@ def load_config() -> dict:
     return {}
 
 
-DEFAULT_CADENCE_ZONES = {
-    "recovery":    [70,  85],
-    "endurance":   [80,  95],
-    "tempo":       [88, 100],
-    "threshold":   [88, 100],
-    "vo2 max":     [90, 110],
-    "anaerobic":   [90, 110],
-    "neuromuscular":[90, 110],
-}
 
-def save_config(athlete_id: str, api_key: str,
-                tolerance: int = 15,
-                cadence_zones: dict = None):
+def save_config(athlete_id: str, api_key: str):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
-        "athlete_id":    athlete_id,
-        "api_key":       api_key,
-        "tolerance":     tolerance,
-        "cadence_zones": cadence_zones or DEFAULT_CADENCE_ZONES,
+        "athlete_id": athlete_id,
+        "api_key":    api_key,
+    }
+    existing = load_config()
+    if "local_athlete" in existing:
+        data["local_athlete"] = existing["local_athlete"]
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def save_local_athlete(ftp: int, hr_max: int,
+                       power_zones: list = None, hr_zones: list = None,
+                       cadence_tolerance: int = 5):
+    """Spremi FTP, HR max, zone i kadenca toleranciju lokalno."""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = load_config()
+    data["local_athlete"] = {
+        "ftp":               ftp,
+        "hr_max":            hr_max,
+        "power_zones":       power_zones or [],
+        "hr_zones":          hr_zones or [],
+        "cadence_tolerance": cadence_tolerance,
     }
     with open(CONFIG_PATH, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def load_local_athlete() -> dict:
+    """
+    Učitaj lokalno spremljene athlete podatke.
+    Vraća dict s ključevima: ftp, hr_max, power_zones, hr_zones
+    ili prazan dict ako nema podataka.
+    """
+    cfg = load_config()
+    return cfg.get("local_athlete", {})
 
 
 def _get(url: str, api_key: str) -> dict | list:
@@ -54,6 +71,7 @@ def _get(url: str, api_key: str) -> dict | list:
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Basic {credentials}")
     req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
 

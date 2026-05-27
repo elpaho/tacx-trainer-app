@@ -303,16 +303,33 @@ class DescriptionParser:
     """
 
     _DUR_RE   = re.compile(r'(\d+(?:\.\d+)?)\s*(s|m|h)(?:\s|$)', re.IGNORECASE)
-    _POWER_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(%[^a-zA-Z]*ftp|w\b)', re.IGNORECASE)
-    _RAMP_RE  = re.compile(r'ramp\s+(\d+)-(\d+)\s*%[^a-zA-Z]*ftp', re.IGNORECASE)
+    _POWER_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(%(?:\s*ftp)?|w\b)', re.IGNORECASE)
+    _RAMP_RE  = re.compile(r'ramp\s+(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)
     _RAMP_W_RE = re.compile(r'ramp\s+(\d+)-(\d+)\s*w\b', re.IGNORECASE)
+    _RANGE_RE = re.compile(r'(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)  # npr. 70-74%
+    _CADENCE_RE = re.compile(r'@?\s*(\d+)(?:-(\d+))?\s*rpm', re.IGNORECASE)  # @85rpm ili @88-92rpm
     _SLOPE_RE = _SLOPE_RE  # reuse global
-    _RPT_RE   = re.compile(r'^(\d+)x\s*$')
+    _RPT_RE   = re.compile(r'^(?:main\s+set\s+)?(\d+)x\s*$', re.IGNORECASE)
 
     def parse(self, description: str, ftp: int = 240, name: str = "Workout") -> Workout:
         workout = Workout(name=name, ftp=ftp)
-        workout.description = description  # sačuvaj originalni tekst za edit
-        workout.intervals = self._parse_lines(description.strip().splitlines(), ftp)
+        workout.description = description
+        intervals = self._parse_lines(description.strip().splitlines(), ftp)
+        # Post-processing: prvi ramp gore bez naziva → Warmup
+        #                  zadnji ramp dolje bez naziva → Cooldown
+        _NAMELESS = {"ftp", "ramp", "warmup", "cooldown", ""}
+        if intervals:
+            first = intervals[0]
+            if (first.type == "ramp"
+                    and first.power_pct_end >= first.power_pct
+                    and first.name.lower() in _NAMELESS):
+                first.name = "Warmup"
+            last = intervals[-1]
+            if (last.type == "ramp"
+                    and last.power_pct_end <= last.power_pct
+                    and last.name.lower() in _NAMELESS):
+                last.name = "Cooldown"
+        workout.intervals = intervals
         return workout
 
     def _parse_lines(self, lines: list, ftp: int) -> list:
@@ -344,9 +361,30 @@ class DescriptionParser:
                     result.append(iv)
         return result
 
+    def _clean_name(self, name: str) -> str:
+        """Ukloni artefakte iz naziva intervala: @, FTP, zaostale %, itd."""
+        name = re.sub(r'%\s*ftp', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\bftp\b', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'@', '', name)
+        name = re.sub(r'\s+', ' ', name)
+        return name.strip(' -')
+
     def _parse_step(self, line: str, ftp: int):
         # Ukloni zagrade s wattima koje intervals.icu dodaje: (132-187w), (209w)
         line = re.sub(r'\(\d+(?:-\d+)?w\)', '', line, flags=re.IGNORECASE).strip()
+        # Izvuci preporučenu kadencu ako postoji (@85rpm ili @88-92rpm)
+        cadence_rpm = 0
+        rpm_m = self._CADENCE_RE.search(line)
+        if rpm_m:
+            try:
+                rpm_lo = int(rpm_m.group(1))
+                rpm_hi = int(rpm_m.group(2)) if rpm_m.group(2) else rpm_lo
+                cadence_rpm = round((rpm_lo + rpm_hi) / 2)
+            except Exception:
+                cadence_rpm = 0
+        # Ukloni kadenciju iz linije da ne smeta daljnjem parsiranju
+        line = self._CADENCE_RE.sub('', line).strip()
+
         dur_m = self._DUR_RE.search(line)
         if not dur_m:
             return None
@@ -374,8 +412,9 @@ class DescriptionParser:
         if ramp_w_m or ramp_m:
             _GENERIC_RAMP = {"ramp", "warmup", "warm up", "warm-up", "cooldown",
                               "cool down", "cool-down", ""}
+            default_name = "Warmup" if p_end >= p_start else "Cooldown"
             if not name or name.lower() in _GENERIC_RAMP:
-                name = "Warmup" if p_end >= p_start else "Cooldown"
+                name = default_name
             return WorkoutInterval(
                 name=name,
                 duration=duration,
@@ -383,6 +422,30 @@ class DescriptionParser:
                 power_pct_end=p_end,
                 type="ramp",
                 slope=slope,
+                cadence_rpm=cadence_rpm,
+            )
+
+        # Raspon bez "Ramp" keyworda: npr. "70-74%" → uzmi sredinu kao steady state
+        range_m = self._RANGE_RE.search(line)
+        if range_m:
+            p_lo = float(range_m.group(1)) / 100
+            p_hi = float(range_m.group(2)) / 100
+            pct  = round((p_lo + p_hi) / 2, 4)
+            name = self._RANGE_RE.sub('', line)
+            name = self._DUR_RE.sub('', name)
+            name = self._clean_name(name)
+            _GENERIC = {"steady", "steadystate", "interval", "work", "on", "off",
+                        "recovery", "recover", "rest"}
+            if not name or name.lower() in _GENERIC:
+                name = _zone_name(pct)
+            return WorkoutInterval(
+                name=name,
+                duration=duration,
+                power_pct=pct,
+                power_pct_end=pct,
+                type="steadystate",
+                slope=slope,
+                cadence_rpm=cadence_rpm,
             )
 
         pm = self._POWER_RE.search(line)
@@ -395,8 +458,7 @@ class DescriptionParser:
         name = self._SLOPE_RE.sub('', line)
         name = self._DUR_RE.sub('', name)
         name = self._POWER_RE.sub('', name)
-        name = re.sub(r'%\s*ftp', '', name, flags=re.IGNORECASE)
-        name = name.strip(' -')
+        name = self._clean_name(name)
 
         # Normaliziraj generičke nazive iz intervals.icu exporta
         _GENERIC = {"steady", "steadystate", "interval", "work", "on", "off",
@@ -411,4 +473,5 @@ class DescriptionParser:
             power_pct_end=round(pct, 4),
             type="steadystate",
             slope=slope,
+            cadence_rpm=cadence_rpm,
         )

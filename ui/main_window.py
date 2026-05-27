@@ -139,6 +139,52 @@ class IntervalDotsWidget(QWidget):
 
             painter.drawEllipse(x, cy - r, DOT, DOT)
 
+class TimeAxisWidget(QWidget):
+    """Vremenska os ispod interval bara — crtica svake 5 min, label svake 10 min."""
+
+    def __init__(self):
+        super().__init__()
+        self._total_duration: int = 0
+        self.setFixedHeight(16)
+
+    def set_total_duration(self, seconds: int):
+        self._total_duration = seconds
+        self.update()
+
+    def paintEvent(self, event):
+        if self._total_duration <= 0:
+            return
+        from PyQt6.QtGui import QFont
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W = self.width()
+        total = self._total_duration
+
+        font = QFont()
+        font.setPixelSize(9)
+        painter.setFont(font)
+
+        step_5  = 5 * 60   # 5 min u sekundama
+        step_10 = 10 * 60
+
+        t = step_5
+        while t < total:
+            x = int(t / total * W)
+            is_10 = (t % step_10 == 0)
+            # crtica
+            painter.setPen(QPen(QColor("#3a4050"), 1))
+            painter.drawLine(x, 0, x, 5 if is_10 else 3)
+            # label samo na punima 10 min
+            if is_10:
+                minutes = t // 60
+                lbl = str(minutes)
+                fm = painter.fontMetrics()
+                lbl_w = fm.horizontalAdvance(lbl)
+                painter.setPen(QColor("#505868"))
+                painter.drawText(x - lbl_w // 2, 15, lbl)
+            t += step_5
+
+
 class IntervalBar(QWidget):
     """Grafički prikaz intervala workota."""
 
@@ -405,14 +451,18 @@ class IntervalBar(QWidget):
             f"Snaga: {power_str}",
             f"Zona: {zone}",
         ]
+        # Kadenca — iz opisa intervala ili iz power zone (ako je postavljen)
+        cad = getattr(iv, 'cadence_rpm', 0)
+        if cad > 0:
+            lines_tip.append(f"Kadenca: {cad} rpm")
+        elif hasattr(self, '_cadence_lookup_fn'):
+            cad_zone = self._cadence_lookup_fn(iv)
+            if cad_zone > 0:
+                lines_tip.append(f"Kadenca: ~{cad_zone} rpm (zona)")
         self.setToolTip("\n".join(lines_tip))
 
     def mousePressEvent(self, event):
-        if not self.intervals:
-            return
-        idx = self._idx_at_x(event.position().x())
-        if idx >= 0:
-            self.clicked.emit(idx)
+        pass  # klik ne radi ništa — navigacija samo tipkama
 
 
 
@@ -540,17 +590,7 @@ class ArcGaugeWidget(QWidget):
     mode="power": skala 0-600W, zone po FTP postocima
     mode="hr":    skala 60-max bpm, zone po HR zonama
     """
-    # Kadenca zone po tipu intervala
-    CADENCE_ZONES = {
-        "recovery":    (70,  85),
-        "endurance":   (80,  95),
-        "tempo":       (88, 100),
-        "threshold":   (88, 100),
-        "vo2 max":     (90, 110),
-        "anaerobic":   (90, 110),
-        "neuromuscular":(90, 110),
-        "default":     (80,  95),
-    }
+    # Kadenca se određuje iz power zona — nema više lookup tablice po nazivu
 
     def __init__(self, mode: str = "power"):
         super().__init__()
@@ -558,12 +598,12 @@ class ArcGaugeWidget(QWidget):
         self._value = 0
         self._zones: list[dict] = []
         self._ftp   = 220
-        self._cadence_range = (80, 95)   # optimalni raspon za kadencu
-        self._cadence_color = "#ff7f0e"  # boja zone intervala
-        self._lamp_low   = False   # crvena — pojačaj (desno)
-        self._lamp_high  = False   # plava  — smanji (lijevo)
-        self._lamp_active = False  # lampice vidljive samo u slope workout modu
-        self._lamp_blink  = True   # blink state — toggle svakih 500ms
+        self._cadence_range = (0, 0)
+        self._cadence_color = "#378ADD"
+        self._lamp_low    = False
+        self._lamp_high   = False
+        self._lamp_active = False
+        self._lamp_blink  = True
         if mode == "cadence":
             self.setMinimumWidth(200)
         else:
@@ -579,16 +619,16 @@ class ArcGaugeWidget(QWidget):
             self._value = value
             self.update()
 
-    def set_cadence_zone(self, interval_name: str, zone_color: str):
-        """Postavi optimalni raspon kadence prema nazivu intervala."""
-        key = interval_name.lower()
-        found = None
-        for k, v in self.CADENCE_ZONES.items():
-            if k in key:
-                found = v
-                break
-        self._cadence_range = found or self.CADENCE_ZONES.get("default", (80, 95))
-        self._cadence_color = zone_color
+    def set_cadence_rpm(self, rpm: int, zone_color: str = "", tolerance: int = 5):
+        """Postavi raspon kadence iz rpm vrijednosti ± tolerancija."""
+        self._cadence_range = (rpm - tolerance, rpm + tolerance)
+        self._cadence_color = "#378ADD"
+        self.update()
+
+    def set_cadence_range_direct(self, lo: float, hi: float, zone_color: str = ""):
+        """Postavi raspon kadence direktno (za interpolaciju)."""
+        self._cadence_range = (round(lo), round(hi))
+        self._cadence_color = "#378ADD"
         self.update()
 
     def set_lamps(self, low: bool, high: bool, active: bool = True):
@@ -699,7 +739,7 @@ class ArcGaugeWidget(QWidget):
 
 
         # Cadence — optimalna zona obojena
-        if self._mode == "cadence" and self._cadence_range:
+        if self._mode == "cadence" and self._cadence_range and self._cadence_range != (0, 0):
             c_lo, c_hi = self._cadence_range
             a_lo = angle(max(c_lo, v_min))
             a_hi = angle(min(c_hi, v_max))
@@ -927,122 +967,187 @@ class SlopePanelWidget(QWidget):
             f"ref {self._ref_power} W  ±{self._tolerance} W"
         )
 
-class BalanceWidget(QWidget):
+class GradeWidget(QWidget):
     """
-    Prikaz L/R balance i pedal smoothness.
-    Gornji dio: horizontalna traka koja vizualno prikazuje omjer L/R.
-    Donji dio: smoothness za lijevu i desnu nogu.
+    Bubble level inklinometar za prikaz i ručnu korekciju nagiba.
+    - Skala: -10% do +10%, korak 0.5%
+    - U slobodnom modu: direktna kontrola nagiba
+    - U slope workout modu: prikazuje nagib intervala + ručna korekcija
+    - Kad se interval promijeni: korekcija se resetira na 0
     """
+
+    # signal prema MainWindow — novi željeni nagib
+    grade_changed = pyqtSignal(float)
+
+    GRADE_MIN = -10.0
+    GRADE_MAX =  10.0
+    STEP      =  0.5
 
     def __init__(self):
         super().__init__()
-        self._balance_left: float = 0.0   # 0 = nema podatka
-        self._smooth_left: float = 0.0
-        self._smooth_right: float = 0.0
-        self.setFixedHeight(62)
+        self._base_grade: float = 0.0      # nagib iz workota ili slobodnog moda
+        self._correction: float = 0.0      # ručna korekcija korisnika
+        self._last_interval_idx: int = -1  # za detekciju promjene intervala
+        self.setFixedHeight(74)
+        self._setup_ui()
 
-    def update_data(self, balance_left: float, smooth_left: float, smooth_right: float):
-        if (balance_left != self._balance_left or
-                smooth_left != self._smooth_left or
-                smooth_right != self._smooth_right):
-            self._balance_left = balance_left
-            self._smooth_left = smooth_left
-            self._smooth_right = smooth_right
+    def _setup_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+
+        # bubble canvas
+        self._canvas = _BubbleCanvas(self)
+        self._canvas.setFixedHeight(32)
+        lay.addWidget(self._canvas)
+
+        # tipke + vrijednost
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        self._btn_minus = QPushButton("−")
+        self._btn_minus.setFixedSize(28, 28)
+        self._btn_minus.clicked.connect(self._on_minus)
+
+        self._val_lbl = QLabel("0.0%")
+        self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._val_lbl.setStyleSheet(
+            "font-family: 'Courier New'; font-size: 15px; font-weight: 500; color: #e8e0d0;"
+        )
+
+        self._btn_plus = QPushButton("+")
+        self._btn_plus.setFixedSize(28, 28)
+        self._btn_plus.clicked.connect(self._on_plus)
+
+        self._corr_lbl = QLabel("")
+        self._corr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._corr_lbl.setStyleSheet("font-size: 9px; color: #505868;")
+
+        btn_row.addWidget(self._btn_minus)
+        btn_row.addWidget(self._val_lbl, stretch=1)
+        btn_row.addWidget(self._btn_plus)
+        lay.addLayout(btn_row)
+        lay.addWidget(self._corr_lbl)
+
+        self._refresh()
+
+    def set_base_grade(self, grade: float, interval_idx: int = -1):
+        """Postavi bazni nagib (iz workota ili slobodnog moda).
+        Ako se interval promijenio, resetiraj korekciju."""
+        if interval_idx != self._last_interval_idx and interval_idx >= 0:
+            self._correction = 0.0
+            self._last_interval_idx = interval_idx
+        self._base_grade = grade
+        self._refresh()
+
+    def _effective_grade(self) -> float:
+        return max(self.GRADE_MIN, min(self.GRADE_MAX,
+                   round((self._base_grade + self._correction) * 10) / 10))
+
+    def _on_minus(self):
+        self._correction = round((self._correction - self.STEP) * 10) / 10
+        # ne dozvoli pad ispod minimuma
+        if self._effective_grade() <= self.GRADE_MIN:
+            self._correction = round((self.GRADE_MIN - self._base_grade) * 10) / 10
+        self._refresh()
+        self.grade_changed.emit(self._effective_grade())
+
+    def _on_plus(self):
+        self._correction = round((self._correction + self.STEP) * 10) / 10
+        if self._effective_grade() >= self.GRADE_MAX:
+            self._correction = round((self.GRADE_MAX - self._base_grade) * 10) / 10
+        self._refresh()
+        self.grade_changed.emit(self._effective_grade())
+
+    def _refresh(self):
+        g = self._effective_grade()
+        sign = "+" if g >= 0 else ""
+        self._val_lbl.setText(f"{sign}{g:.1f}%")
+        self._canvas.set_grade(g)
+        # korekcija label — prikaži samo kad != 0
+        if abs(self._correction) > 0.01:
+            csign = "+" if self._correction > 0 else ""
+            self._corr_lbl.setText(f"baza {self._base_grade:+.1f}%  korekcija {csign}{self._correction:.1f}%")
+        else:
+            self._corr_lbl.setText("")
+
+
+class _BubbleCanvas(QWidget):
+    """Crtanje bubble level trake."""
+
+    GRADE_MIN = -10.0
+    GRADE_MAX =  10.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._grade: float = 0.0
+
+    def set_grade(self, grade: float):
+        if grade != self._grade:
+            self._grade = grade
             self.update()
 
     def paintEvent(self, event):
+        import math as _m
         from PyQt6.QtGui import QFont
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
 
-        no_data = self._balance_left <= 0.0
-        bal_l = self._balance_left if not no_data else 50.0
-        bal_r = 100.0 - bal_l
+        pad = 14          # prostor za oznake na rubovima
+        track_y = H // 2
+        track_h = 8
+        track_x = pad
+        track_w = W - 2 * pad
 
-        font_sm = QFont()
-        font_sm.setPixelSize(9)
-        font_md = QFont("Courier New")
-        font_md.setPixelSize(11)
-        font_md.setBold(True)
-
-        # ── L/R Balance traka ──────────────────────────────────────
-        bar_y = 4
-        bar_h = 16
-        lbl_w = 20   # prostor za "L" i "R" labele sa strane
-        pct_w = 28   # prostor za postotak s lijeve i desne strane
-        bar_x = lbl_w + pct_w
-        bar_w = W - 2 * (lbl_w + pct_w)
-
-        # pozadina trake
+        # track pozadina
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#1e2230"))
-        painter.drawRoundedRect(bar_x, bar_y, bar_w, bar_h, 4, 4)
+        painter.drawRoundedRect(track_x, track_y - track_h // 2,
+                                track_w, track_h, track_h // 2, track_h // 2)
 
-        if not no_data:
-            split_x = int(bar_w * bal_l / 100.0)
-            # lijeva strana — plava
-            painter.setBrush(QColor("#378ADD"))
-            painter.drawRoundedRect(bar_x, bar_y, split_x, bar_h, 4, 4)
-            # desna strana — narančasta
-            painter.setBrush(QColor("#c8a84b"))
-            painter.drawRoundedRect(bar_x + split_x, bar_y, bar_w - split_x, bar_h, 4, 4)
-            # sredinska linija
-            painter.setPen(QPen(QColor("#0e1015"), 2))
-            mid = bar_x + bar_w // 2
-            painter.drawLine(mid, bar_y + 2, mid, bar_y + bar_h - 2)
+        # sredinska crta (0%)
+        mid_x = track_x + track_w // 2
+        painter.setPen(QPen(QColor("#3a4050"), 1))
+        painter.drawLine(mid_x, track_y - track_h // 2 - 2,
+                         mid_x, track_y + track_h // 2 + 2)
+
+        # pozicija mjehurića
+        t = (self._grade - self.GRADE_MIN) / (self.GRADE_MAX - self.GRADE_MIN)
+        bx = int(track_x + t * track_w)
+        bubble_r = 13
+
+        # boja prema nagibu
+        abs_g = abs(self._grade)
+        if abs_g < 0.3:
+            bubble_color = QColor("#009e80")   # zelena — ravno
+            border_color = QColor("#007060")
+        elif self._grade > 0:
+            # uzbrdo — crvena, jača kako raste
+            intensity = min(abs_g / 10.0, 1.0)
+            r = int(180 + intensity * 75)
+            bubble_color = QColor(r, 60, 60)
+            border_color = QColor("#dd0447")
         else:
-            # nema podatka — prikaži crtice
-            painter.setPen(QColor("#3a4050"))
-            painter.setFont(font_sm)
-            painter.drawText(bar_x, bar_y, bar_w, bar_h,
-                             Qt.AlignmentFlag.AlignCenter, "—")
+            # nizbrdo — plava
+            intensity = min(abs_g / 10.0, 1.0)
+            b = int(160 + intensity * 80)
+            bubble_color = QColor(50, 100, b)
+            border_color = QColor("#378ADD")
 
-        # L label i postotak lijevo
-        painter.setPen(QColor("#378ADD") if not no_data else QColor("#3a4050"))
-        painter.setFont(font_sm)
-        painter.drawText(0, bar_y, lbl_w, bar_h, Qt.AlignmentFlag.AlignCenter, "L")
-        painter.setFont(font_md)
-        l_str = f"{bal_l:.0f}%" if not no_data else "—"
-        painter.drawText(lbl_w, bar_y, pct_w, bar_h,
-                         Qt.AlignmentFlag.AlignCenter, l_str)
+        # mjehurić
+        painter.setPen(QPen(border_color, 2))
+        painter.setBrush(bubble_color)
+        painter.drawEllipse(bx - bubble_r, track_y - bubble_r,
+                            bubble_r * 2, bubble_r * 2)
 
-        # R label i postotak desno
-        painter.setPen(QColor("#c8a84b") if not no_data else QColor("#3a4050"))
-        painter.setFont(font_sm)
-        painter.drawText(W - lbl_w, bar_y, lbl_w, bar_h, Qt.AlignmentFlag.AlignCenter, "R")
-        painter.setFont(font_md)
-        r_str = f"{bal_r:.0f}%" if not no_data else "—"
-        painter.drawText(W - lbl_w - pct_w, bar_y, pct_w, bar_h,
-                         Qt.AlignmentFlag.AlignCenter, r_str)
-
-        # ── Smoothness ─────────────────────────────────────────────
-        sm_y = bar_y + bar_h + 6
-        sm_h = H - sm_y - 4
-        sm_bar_w = (bar_w - 6) // 2
-
-        for side, val, color, x_off in [
-            ("L smooth", self._smooth_left,  "#378ADD", bar_x),
-            ("R smooth", self._smooth_right, "#c8a84b", bar_x + sm_bar_w + 6),
-        ]:
-            has_val = val > 0.0
-            # pozadina
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#1e2230"))
-            painter.drawRoundedRect(x_off, sm_y, sm_bar_w, sm_h, 3, 3)
-            # fill
-            if has_val:
-                fill_w = max(3, int(sm_bar_w * val / 100.0))
-                c = QColor(color)
-                c.setAlphaF(0.75)
-                painter.setBrush(c)
-                painter.drawRoundedRect(x_off, sm_y, fill_w, sm_h, 3, 3)
-            # tekst
-            painter.setPen(QColor(color) if has_val else QColor("#3a4050"))
-            painter.setFont(font_sm)
-            val_str = f"{val:.0f}%" if has_val else "—"
-            painter.drawText(x_off, sm_y, sm_bar_w, sm_h,
-                             Qt.AlignmentFlag.AlignCenter, val_str)
+        # oznake rubova
+        font = QFont()
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.setPen(QColor("#3a4050"))
+        painter.drawText(0, 0, pad, H, Qt.AlignmentFlag.AlignCenter, "-10")
+        painter.drawText(W - pad, 0, pad, H, Qt.AlignmentFlag.AlignCenter, "+10")
 
 
 class PowerHrChart(QWidget):
@@ -1170,7 +1275,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 620)
 
         self.player = WorkoutPlayer()
-        self.mode = TrainerMode.SIMULATION
+        self.mode = TrainerMode.ERG
         self.trainer_state = ConnectionState.DISCONNECTED
         self.hr_state = ConnectionState.DISCONNECTED
         self._trainer = None
@@ -1186,22 +1291,20 @@ class MainWindow(QMainWindow):
         self._intervals_workouts_today: list = []
         self._zone_color_tick = 0  # brojač za osvježavanje boja zona
         self._prev_interval_idx = 0
+        self._cadence_interpolating = False
         # Blink timer za lampice — 500ms
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._on_blink_tick)
         self._blink_timer.start(500)
-        # Učitaj tolerance i cadence_zones iz configa
-        from intervals.client import load_config, DEFAULT_CADENCE_ZONES
+        from intervals.client import load_config, load_local_athlete
         _cfg = load_config()
         self._tolerance = int(_cfg.get("tolerance", 15))
-        self._cadence_zones_cfg = _cfg.get("cadence_zones", dict(DEFAULT_CADENCE_ZONES))
 
         self._setup_ui()
         self._setup_chart()
         self._setup_timer()
         self._apply_stylesheet()
 
-        # poveži thread-safe signale s Qt slot metodama
         self._metrics_signal.connect(self._on_metrics_received)
         self._state_signal.connect(self._on_state_received)
         self._hr_signal.connect(self._on_hr_received)
@@ -1210,8 +1313,10 @@ class MainWindow(QMainWindow):
         self._intervals_done_signal.connect(self._intervals_on_done)
         self._intervals_error_signal.connect(self._intervals_on_error)
 
-        # auto-spoji intervals.icu ako postoji spremljeni config
-        from intervals.client import load_config
+        local = load_local_athlete()
+        if local:
+            self._apply_local_athlete(local)
+
         cfg = load_config()
         if cfg.get("athlete_id") and cfg.get("api_key"):
             self._intervals_athlete_id = cfg["athlete_id"]
@@ -1479,6 +1584,9 @@ class MainWindow(QMainWindow):
         self.interval_bar.clicked.connect(self._on_interval_clicked)
         wo_layout.addWidget(self.interval_bar, stretch=1)
 
+        self.time_axis = TimeAxisWidget()
+        wo_layout.addWidget(self.time_axis)
+
         # Stat bar — isti grid kao timegrid ispod (4 col), lampice=col 0-2, IF/TSS=col 3
         wo_stats = QHBoxLayout()
         wo_stats.setSpacing(5)
@@ -1573,10 +1681,10 @@ class MainWindow(QMainWindow):
         # mod
         mode_row = QHBoxLayout()
         self.btn_erg = QPushButton("ERG")
-        self.btn_erg.setObjectName("modeInactive")
+        self.btn_erg.setObjectName("modeActive")
         self.btn_erg.clicked.connect(lambda: self._set_mode(TrainerMode.ERG))
         self.btn_sim = QPushButton("Slope")
-        self.btn_sim.setObjectName("modeActive")
+        self.btn_sim.setObjectName("modeInactive")
         self.btn_sim.clicked.connect(lambda: self._set_mode(TrainerMode.SIMULATION))
         mode_row.addWidget(self.btn_erg)
         mode_row.addWidget(self.btn_sim)
@@ -1666,21 +1774,23 @@ class MainWindow(QMainWindow):
         hr_lay.addWidget(self.hr_zone_bar)
         lay.addWidget(hr_frame)
 
-        # L/R Balance + Smoothness kutija
-        bal_frame = QFrame()
-        bal_frame.setObjectName("ftpBox")
-        bal_lay = QVBoxLayout(bal_frame)
-        bal_lay.setContentsMargins(6, 4, 6, 4)
-        bal_lay.setSpacing(2)
-        bal_title = QLabel("L/R BALANS")
-        bal_title.setStyleSheet("font-size: 9px; color: #3a4050; letter-spacing: 2px;")
-        self.balance_widget = BalanceWidget()
-        bal_lay.addWidget(bal_title)
-        bal_lay.addWidget(self.balance_widget)
-        lay.addWidget(bal_frame)
+        # Nagib — bubble level inklinometar (vidljiv samo u workout modu)
+        self._grade_frame = QFrame()
+        self._grade_frame.setObjectName("ftpBox")
+        grade_lay = QVBoxLayout(self._grade_frame)
+        grade_lay.setContentsMargins(6, 4, 6, 4)
+        grade_lay.setSpacing(2)
+        grade_title = QLabel("NAGIB")
+        grade_title.setStyleSheet("font-size: 9px; color: #3a4050; letter-spacing: 2px;")
+        self.grade_widget = GradeWidget()
+        self.grade_widget.grade_changed.connect(self._on_grade_widget_changed)
+        grade_lay.addWidget(grade_title)
+        grade_lay.addWidget(self.grade_widget)
+        self._grade_frame.setVisible(False)  # sakriven dok nema workota
+        lay.addWidget(self._grade_frame)
 
         intervals_btn_row = QHBoxLayout()
-        self.intervals_connect_btn = QPushButton("Poveži ↗")
+        self.intervals_connect_btn = QPushButton("Postavke ↗")
         self.intervals_connect_btn.setStyleSheet("font-size: 11px;")
         self.intervals_connect_btn.clicked.connect(self._on_intervals_connect)
         self.intervals_today_btn = QPushButton("Danas")
@@ -1809,25 +1919,53 @@ class MainWindow(QMainWindow):
                 hr = self._hr_monitor.current_hr if self._hr_monitor and self._hr_monitor.connected else 0
                 self.chart_widget.add_point(power, hr)
 
+                # Uzmi remaining PRIJE tick-a — za interpolaciju
+                remaining_before = self.player.interval_remaining
+
                 was_active = self.player.is_active
                 self.player.tick()
                 self._update_timebar()
 
-                # Evaluiraj prethodni interval
+                # Remaining NAKON tick-a — za beep i interpolaciju
+                remaining_after = self.player.interval_remaining
+
+                # Evaluiraj prethodni interval i postavi cadence range za novi
                 if hasattr(self, "_prev_interval_idx") and self._prev_interval_idx != self.player.current_idx:
                     from ble.trainer import ConnectionState as _CS
                     if self._trainer and self._trainer.state == _CS.CONNECTED:
                         self._last_interval_avg_power = getattr(self._trainer, "_interval_avg_power", 0)
-                    # Spremi koliko je sekundi odrađeno u prethodnom intervalu
                     self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
                     self._evaluate_interval(self._prev_interval_idx)
                     self._interval_elapsed = 0
+                    self._play_sound("new_interval")
+                    self._cadence_interpolating = False
+                    # Postavi cadence range za novi interval
+                    self._set_cadence_for_current_interval()
                 else:
                     self._interval_elapsed = getattr(self, "_interval_elapsed", 0) + 1
+                    # Beep na točno 10 sec — koristimo remaining_after (isti kao na ekranu)
+                    if remaining_after == 10:
+                        self._play_sound("countdown")
+
+                # Interpolacija cadence ranga — koristimo remaining_after
+                if remaining_after <= 10:
+                    self._interpolate_cadence_range(remaining_after)
+
                 self._prev_interval_idx = self.player.current_idx
-                # Workout završen — simuliraj stop
+
+                # Workout završen — evaluiraj zadnji interval pa stop
                 if was_active and not self.player.is_active:
-                    QTimer.singleShot(0, self._on_stop)
+                    n = len(self.player.workout.intervals) if self.player.workout else 0
+                    print(f"[eval_last] prev_idx={self._prev_interval_idx} n_intervals={n} "
+                          f"_interval_elapsed={getattr(self,'_interval_elapsed',0)} "
+                          f"_last_interval_elapsed={getattr(self,'_last_interval_elapsed',0)}")
+                    from ble.trainer import ConnectionState as _CS
+                    if self._trainer and self._trainer.state == _CS.CONNECTED:
+                        self._last_interval_avg_power = getattr(self._trainer, "_interval_avg_power", 0)
+                    self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
+                    self._evaluate_interval(self._prev_interval_idx, force=True)
+                    self._last_interval_evaluated = True
+                    QTimer.singleShot(100, self._on_stop)
                     return
 
                 # pošalji naredbu trenažeru kad se interval promijeni ili na početku
@@ -1878,10 +2016,19 @@ class MainWindow(QMainWindow):
             self._apply_zone_colors(pwr, hr)
         # slope panel svaki tick — mora reagirati odmah
         self._update_slope_panel()
-        # balance + smoothness
-        self.balance_widget.update_data(
-            m.balance_left, m.smoothness_left, m.smoothness_right
-        )
+        # grade widget — vidljiv samo ako workout ima slope intervale
+        iv = self.player.current_interval
+        has_workout = self.player.workout is not None
+        has_slope_wkt = has_workout and any(
+            getattr(i, 'slope', None) is not None for i in self.player.workout.intervals)
+        is_slope_iv = iv is not None and getattr(iv, 'slope', None) is not None
+        self._grade_frame.setVisible(has_slope_wkt)
+        if is_slope_iv:
+            self.grade_widget.setEnabled(True)
+            self.grade_widget.set_base_grade(iv.slope, self.player.current_idx)
+        else:
+            self.grade_widget.set_base_grade(0.0, -1)
+            self.grade_widget.setEnabled(False)
 
     def _update_timebar(self):
         from datetime import datetime
@@ -1969,26 +2116,52 @@ class MainWindow(QMainWindow):
 
     def _on_intervals_connect(self):
         from intervals.settings_dialog import IntervalsSettingsDialog
+        from intervals.client import load_local_athlete, save_config, save_local_athlete
+        local = load_local_athlete()
         dlg = IntervalsSettingsDialog(
             self,
             athlete_id=self._intervals_athlete_id,
             api_key=self._intervals_api_key,
             tolerance=self._tolerance,
-            cadence_zones=self._cadence_zones_cfg,
+            local_ftp=local.get("ftp", 0),
+            local_hr_max=local.get("hr_max", 0),
+            local_power_zones=local.get("power_zones", []),
+            local_hr_zones=local.get("hr_zones", []),
+            cadence_tolerance=local.get("cadence_tolerance", 5),
         )
         if dlg.exec():
             aid, key = dlg.get_credentials()
             self._intervals_athlete_id = aid
             self._intervals_api_key    = key
             self._tolerance            = dlg.tolerance
-            self._cadence_zones_cfg    = dlg.cadence_zones
-            # Ažuriraj cadence gauge raspone
-            self.cadence_gauge.CADENCE_ZONES = {
-                k: tuple(v) for k, v in dlg.cadence_zones.items()
-            }
-            from intervals.client import save_config
-            save_config(aid, key, tolerance=dlg.tolerance,
-                        cadence_zones=dlg.cadence_zones)
+            save_config(aid, key)
+            # Spremi zone i kadence postavke lokalno
+            if dlg.local_ftp > 0 or dlg.local_hr_max > 0 or dlg.local_power_zones:
+                new_ftp    = dlg.local_ftp    or local.get("ftp", 0)
+                new_hr_max = dlg.local_hr_max or local.get("hr_max", 0)
+                dlg_pw = getattr(dlg, "local_power_zones", [])
+                dlg_hr = getattr(dlg, "local_hr_zones", [])
+                new_power_zones = (dlg_pw if any(z.get("max_val", 0) > 0 for z in dlg_pw)
+                                   else self._build_power_zones_from_ftp(new_ftp) if new_ftp > 0
+                                   else local.get("power_zones", []))
+                new_hr_zones = (dlg_hr if any(z.get("max_val", 0) > 0 for z in dlg_hr)
+                                else self._build_hr_zones_from_max(new_hr_max) if new_hr_max > 0
+                                else local.get("hr_zones", []))
+                save_local_athlete(
+                    ftp=new_ftp,
+                    hr_max=new_hr_max,
+                    power_zones=new_power_zones,
+                    hr_zones=new_hr_zones,
+                    cadence_tolerance=dlg.cadence_tolerance,
+                )
+                # Invalidate cache
+                if hasattr(self, '_local_athlete_cache'):
+                    del self._local_athlete_cache
+                self._apply_local_athlete({
+                    "ftp": new_ftp, "hr_max": new_hr_max,
+                    "power_zones": new_power_zones, "hr_zones": new_hr_zones,
+                    "cadence_tolerance": dlg.cadence_tolerance,
+                })
             self.topbar_athlete_lbl.setText("⏳ Spajanje...")
             self._intervals_fetch_start()
 
@@ -2124,6 +2297,154 @@ class MainWindow(QMainWindow):
             on_error=lambda e: self._intervals_error_signal.emit(e),
         )
 
+    def _set_cadence_for_current_interval(self):
+        """Postavi cadence range za trenutni interval."""
+        iv = self.player.current_interval
+        if iv is None:
+            return
+        local = self._get_local_athlete_cached()
+        tol = local.get("cadence_tolerance", 5)
+        rpm = iv.cadence_rpm if iv.cadence_rpm > 0 else self._cadence_for_interval(iv)
+        if rpm > 0:
+            self.cadence_gauge.set_cadence_rpm(rpm, "", tol)
+
+
+    def _interpolate_cadence_range(self, remaining: int):
+        """Linearno interpoliraj cadence range prema sljedećem intervalu (zadnjih 10s)."""
+        if not self.player.workout:
+            return
+        intervals = self.player.workout.intervals
+        cur_idx  = self.player.current_idx
+        next_idx = cur_idx + 1
+        if next_idx >= len(intervals):
+            return  # zadnji interval
+
+        local = self._get_local_athlete_cached()
+        tol = local.get("cadence_tolerance", 5)
+
+        cur_iv  = intervals[cur_idx]
+        next_iv = intervals[next_idx]
+
+        cur_rpm  = cur_iv.cadence_rpm  if cur_iv.cadence_rpm  > 0 else self._cadence_for_interval(cur_iv)
+        next_rpm = next_iv.cadence_rpm if next_iv.cadence_rpm > 0 else self._cadence_for_interval(next_iv)
+
+        if cur_rpm <= 0 or next_rpm <= 0 or cur_rpm == next_rpm:
+            return
+
+        # remaining: 10 → alpha=0.0, 1 → alpha=0.9, 0 → alpha=1.0
+        alpha = (10 - remaining) / 10.0
+        alpha = max(0.0, min(1.0, alpha))
+        interp_rpm = cur_rpm + alpha * (next_rpm - cur_rpm)
+
+        self._cadence_interpolating = True
+        self.cadence_gauge.set_cadence_range_direct(interp_rpm - tol, interp_rpm + tol)
+
+    def _play_sound(self, kind: str):
+        """
+        Reproduciraj zvučni signal u zasebnom threadu da ne blokira UI.
+        kind: 'new_interval' — dva kratka beep-a (novi interval počeo)
+              'countdown'    — jedan kratki beep (10 sec do kraja)
+        """
+        import threading
+        def _beep():
+            try:
+                import winsound
+                if kind == "new_interval":
+                    winsound.Beep(880, 120)
+                    import time; time.sleep(0.08)
+                    winsound.Beep(1100, 120)
+                else:  # countdown
+                    winsound.Beep(660, 150)
+            except Exception:
+                try:
+                    from PyQt6.QtWidgets import QApplication
+                    QApplication.beep()
+                except Exception:
+                    pass
+        threading.Thread(target=_beep, daemon=True).start()
+
+    def _get_local_athlete_cached(self) -> dict:
+        """Vrati lokalne athlete podatke — cache da ne čitamo disk svaki tick."""
+        if not hasattr(self, '_local_athlete_cache'):
+            from intervals.client import load_local_athlete
+            self._local_athlete_cache = load_local_athlete()
+        return self._local_athlete_cache
+
+    def _cadence_for_interval(self, iv) -> int:
+        """Vrati preporučenu kadencu za interval na osnovu power zone."""
+        if not self.player.workout:
+            return 0
+        ftp = self.player.workout.ftp or 240
+        watts = round(iv.power_pct * ftp)  # round da izbjegnemo float precision (0.55*220=121.000...01)
+        local = self._get_local_athlete_cached()
+        power_zones = local.get("power_zones", [])
+        default_cadence = [75, 85, 88, 90, 95, 100, 105]
+        for i, z in enumerate(power_zones):
+            if z.get("min_val", 0) <= watts <= z.get("max_val", 9999):
+                rpm = z.get("cadence_rpm", 0)
+                if rpm <= 0:
+                    rpm = default_cadence[i] if i < len(default_cadence) else 85
+                return rpm
+        return 0
+
+    def _build_power_zones_from_ftp(self, ftp: int) -> list[dict]:
+        """Izračunaj 7 power zona iz FTP — standardni Coggan % granice."""
+        pcts   = [55, 75, 90, 105, 120, 150]
+        names  = ["Z1", "Z2", "Z3", "Z4", "Z5", "Z6", "Z7"]
+        colors = ["#009e80","#009e00","#ffcb0e","#ff7f0e","#dd0447","#6633cc","#504861"]
+        zones = []
+        prev = 0
+        for i, pct in enumerate(pcts):
+            max_w = round(ftp * pct / 100)
+            zones.append({"name": names[i], "color": colors[i],
+                          "min_val": int(prev + 1 if prev > 0 else 1), "max_val": int(max_w)})
+            prev = max_w
+        zones.append({"name": "Z7", "color": colors[6],
+                      "min_val": prev + 1, "max_val": 600})
+        return zones
+
+    def _build_hr_zones_from_max(self, hr_max: int) -> list[dict]:
+        """Izračunaj 7 HR zona iz HR max — standardni % granice."""
+        pcts   = [60, 70, 80, 87, 93, 97, 100]
+        names  = ["Z1","Z2","Z3","Z4","Z5","Z6","Z7"]
+        colors = ["#009e80","#009e00","#ffcb0e","#ff7f0e","#dd0447","#6633cc","#504861"]
+        zones = []
+        prev = 0
+        for i, pct in enumerate(pcts):
+            max_bpm = round(hr_max * pct / 100)
+            zones.append({"name": names[i], "color": colors[i],
+                          "min_val": prev + 1 if prev > 0 else 1, "max_val": max_bpm})
+            prev = max_bpm
+        return zones
+
+    def _apply_local_athlete(self, local: dict):
+        """Primijeni lokalno spremljene FTP i HR zone na UI — koristi se kao fallback."""
+        ftp = local.get("ftp")
+        power_zones = local.get("power_zones", [])
+        hr_zones = local.get("hr_zones", [])
+        hr_max = local.get("hr_max")
+
+        stats_parts = []
+        if ftp:
+            stats_parts.append(f"FTP: {ftp} W")
+            if self.player.workout:
+                self.player.workout.ftp = int(ftp)
+        if hr_max:
+            stats_parts.append(f"HR max: {hr_max}")
+        stats = "  ·  ".join(stats_parts)
+
+        if stats_parts:
+            self.topbar_athlete_lbl.setText(f"👤 Lokalni profil  {stats}")
+
+        if power_zones:
+            td = self.player.workout.total_duration if self.player.workout else 0
+            self.power_zone_bar.set_zones(power_zones, td)
+            self.power_gauge.set_zones(power_zones, ftp=ftp or 240)
+        if hr_zones:
+            td = self.player.workout.total_duration if self.player.workout else 0
+            self.hr_zone_bar.set_zones(hr_zones, td)
+            self.hr_gauge.set_zones(hr_zones)
+
     def _intervals_on_done(self, data: dict, workouts: list):
         """Callback — prima se u Qt threadu kroz signal."""
         name = data.get("name") or "—"
@@ -2156,11 +2477,43 @@ class MainWindow(QMainWindow):
         self._update_athlete_ui(name, stats, power_zones, hr_zones)
         self._update_today_ui(workouts)
 
+        # Spremi lokalno kao fallback za sljedeće pokretanje bez interneta
+        if ftp or power_zones or hr_zones:
+            from intervals.client import save_local_athlete
+            hr_max_val = hr_zones[-1]["max_val"] if hr_zones else int(data.get("hr_max") or 0)
+            local_existing = self._get_local_athlete_cached()
+            # Zadrži cadence_rpm iz lokalno spremljenih zona — intervals.icu ih ne poznaje
+            existing_pw = {z.get("name"): z.get("cadence_rpm", 0)
+                           for z in local_existing.get("power_zones", [])}
+            for z in power_zones:
+                if z.get("name") in existing_pw and existing_pw[z["name"]] > 0:
+                    z["cadence_rpm"] = existing_pw[z["name"]]
+            save_local_athlete(
+                ftp=int(ftp) if ftp else 0,
+                hr_max=hr_max_val,
+                power_zones=power_zones,
+                hr_zones=hr_zones,
+                cadence_tolerance=local_existing.get("cadence_tolerance", 5),
+            )
+            # Invalidate cache
+            if hasattr(self, '_local_athlete_cache'):
+                del self._local_athlete_cache
+
     def _intervals_on_error(self, err: str):
         """Callback — prima se u Qt threadu kroz signal."""
-        print(f"[intervals] on_error UI: {err}")
         logger.error(f"intervals.icu greška: {err}")
-        self._update_athlete_ui("Greška spajanja", err[:60], [], [])
+        # Učitaj lokalne podatke i primijeni ih — ne brišemo zone zbog greške spajanja
+        from intervals.client import load_local_athlete
+        local = load_local_athlete()
+        if local:
+            self._apply_local_athlete(local)
+            self.topbar_athlete_lbl.setText(
+                f"⚠ intervals.icu nedostupan  —  {self.topbar_athlete_lbl.text().replace('👤 ', '')}"
+                if "Lokalni" not in self.topbar_athlete_lbl.text()
+                else self.topbar_athlete_lbl.text().replace("👤", "⚠")
+            )
+        else:
+            self._update_athlete_ui("⚠ Greška spajanja", err[:60], [], [])
 
 
     def _parse_power_zones(self, settings: dict, ftp) -> list[dict]:
@@ -2179,7 +2532,7 @@ class MainWindow(QMainWindow):
             # skrati naziv na Z1-Z7 za prikaz
             short = f"Z{i+1}"
             zones.append({"name": short, "color": colors[i % len(colors)],
-                          "min_val": min_w, "max_val": max_w})
+                          "min_val": int(min_w), "max_val": int(max_w)})
             prev = max_w
         # Uvijek dodaj Z7 — intervals.icu ga ne vraća eksplicitno
         zones.append({"name": "Z7", "color": "#504861",
@@ -2259,46 +2612,44 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ Slots
 
-    def _evaluate_interval(self, idx: int):
-        """Evaluiraj odrađeni interval i postavi boju lampice."""
+    def _evaluate_interval(self, idx: int, force: bool = False):
+        """Evaluiraj odrađeni interval i postavi boju lampice.
+        force=True preskače min_time provjeru (za zadnji interval workota)."""
         if not self.player.workout:
+            print(f"[eval] idx={idx} SKIP: no workout")
             return
         ivs = self.player.workout.intervals
         if idx < 0 or idx >= len(ivs):
+            print(f"[eval] idx={idx} SKIP: out of range (len={len(ivs)})")
             return
         iv = ivs[idx]
         ftp = self.player.workout.ftp
 
-        # Ne evaluiraj ako interval nije dovoljno odrađen
-        # Minimalno 30s ILI 50% trajanja intervala
-        elapsed_in_interval = self.player._interval_elapsed if self.player.workout else 0
-        # Uzimamo zadnje poznato trajanje u intervalu (pri evaluaciji je već prešao)
-        elapsed_in_interval = getattr(self, "_last_interval_elapsed", elapsed_in_interval)
-        min_time = max(30, int(iv.duration * 0.50))
-        if elapsed_in_interval < min_time:
-            return  # neutralno — lampica ostaje siva
+        if not force:
+            elapsed_in_interval = self.player._interval_elapsed if self.player.workout else 0
+            elapsed_in_interval = getattr(self, "_last_interval_elapsed", elapsed_in_interval)
+            min_time = max(30, int(iv.duration * 0.50))
+            if elapsed_in_interval < min_time:
+                print(f"[eval] idx={idx} SKIP: elapsed={elapsed_in_interval} < min={min_time}")
+                return
 
-        # Ciljna snaga — prosječna za ramp, direktna za steady/slope
-        if iv.type in ("ramp", "warmup", "cooldown"):
-            target_pct = (iv.power_pct + iv.power_pct_end) / 2
-        else:
-            target_pct = iv.power_pct
+        target_pct = (iv.power_pct + iv.power_pct_end) / 2 if iv.type in ("ramp", "warmup", "cooldown") else iv.power_pct
         target_w = target_pct * ftp * self.player.intensity_pct / 100
-
-        # Avg power — iz playera (interval_avg_power iz zadnjeg tika)
         avg_w = getattr(self, "_last_interval_avg_power", 0)
+        print(f"[eval] idx={idx} '{iv.name}' force={force} target_w={target_w:.0f} avg_w={avg_w:.0f}")
 
         if target_w <= 0 or avg_w <= 0:
-            self.interval_dots.set_result(idx, 1)  # ne možemo evaluirati, zeleno
+            self.interval_dots.set_result(idx, 1)
             return
 
         diff_pct = (avg_w - target_w) / target_w * 100
         if diff_pct >= 5:
-            result = 2   # odlično — jača zelena
+            result = 2
         elif diff_pct >= -5:
-            result = 1   # ok — zelena
+            result = 1
         else:
-            result = 3   # fail — crvena
+            result = 3
+        print(f"[eval] idx={idx} diff={diff_pct:.1f}% → result={result}")
         self.interval_dots.set_result(idx, result)
 
     def _on_blink_tick(self):
@@ -2309,10 +2660,18 @@ class MainWindow(QMainWindow):
         iv = self.player.current_interval
         pwr = self.power_gauge._value
 
-        # Kadenca zona
-        if iv is not None:
-            zone_color = self.interval_bar._interval_color(iv.power_pct).name()
-            self.cadence_gauge.set_cadence_zone(iv.name, zone_color)
+        # Kadenca zona — lookup po power zoni intervala
+        # Preskačemo ako je aktivna interpolacija (zadnjih 10s intervala)
+        if iv is not None and not getattr(self, '_cadence_interpolating', False):
+            local = self._get_local_athlete_cached()
+            tol = local.get("cadence_tolerance", 5)
+            rpm = getattr(iv, 'cadence_rpm', 0)
+            if rpm > 0:
+                self.cadence_gauge.set_cadence_rpm(rpm, "", tol)
+            else:
+                cad_rpm = self._cadence_for_interval(iv)
+                if cad_rpm > 0:
+                    self.cadence_gauge.set_cadence_rpm(cad_rpm, "", tol)
 
         # Lampice — samo u slope modu s referencom
         is_slope = iv is not None and getattr(iv, "slope", None) is not None
@@ -2379,12 +2738,15 @@ class MainWindow(QMainWindow):
         self.player.is_active = False
         self._timer.stop()
         self._set_playing_ui(False)
-        # Evaluiraj zadnji interval
-        if self.player.workout and self._prev_interval_idx >= 0:
-            self._last_interval_avg_power = getattr(self, "_last_interval_avg_power", 0)
-            # Spremi koliko je stvarno odrađeno u zadnjem intervalu
+        # Evaluiraj zadnji interval samo ako nije već evaluiran u tick bloku
+        if (self.player.workout and self._prev_interval_idx >= 0
+                and not getattr(self, '_last_interval_evaluated', False)):
+            from ble.trainer import ConnectionState as _CS
+            if self._trainer and self._trainer.state == _CS.CONNECTED:
+                self._last_interval_avg_power = getattr(self._trainer, "_interval_avg_power", 0)
             self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
-            self._evaluate_interval(self._prev_interval_idx)
+            self._evaluate_interval(self._prev_interval_idx, force=True)
+        self._last_interval_evaluated = False
 
         self.player.reset()
         self._elapsed = 0
@@ -2393,9 +2755,10 @@ class MainWindow(QMainWindow):
         self.progress_fill.setFixedWidth(0)
         self.interval_bar.set_current(0)
         self.interval_bar.set_progress(0.0)
-        # sigurnosno: pošalji slope 0% trenažeru
+        # Sigurnosno pošalji slope 0% samo u slope modu — u ERG modu ne diramo ništa
         if self._trainer and self._trainer.state == ConnectionState.CONNECTED:
-            run_async(self._trainer.set_grade(0.0))
+            if self.mode == TrainerMode.SIMULATION:
+                run_async(self._trainer.set_grade(0.0))
 
     def _on_prev(self):
         self.player.prev_interval()
@@ -2451,6 +2814,12 @@ class MainWindow(QMainWindow):
             run_async(self._trainer.set_grade(grade))
         else:
             run_async(self._trainer.set_target_power(value))
+
+    def _on_grade_widget_changed(self, grade: float):
+        """Korisnik je pritisnuo +/- na grade widgetu — pošalji nagib trenažeru."""
+        if not self._trainer or self._trainer.state != ConnectionState.CONNECTED:
+            return
+        run_async(self._trainer.set_grade(grade))
 
     def _set_mode(self, mode: TrainerMode):
         self.mode = mode
@@ -2748,6 +3117,8 @@ class MainWindow(QMainWindow):
         self.lbl_tss.setText(f"TSS: {workout.tss}")
         self.total_lbl.setText(self._fmt(workout.total_duration))
         self.interval_bar.set_intervals(workout.intervals, 0)
+        self.interval_bar._cadence_lookup_fn = self._cadence_for_interval
+        self.time_axis.set_total_duration(workout.total_duration)
         self.interval_dots.set_intervals(workout.intervals)
         self._prev_interval_idx = 0
         self._interval_elapsed = 0
@@ -2756,6 +3127,13 @@ class MainWindow(QMainWindow):
         self.workout_ctrl.setVisible(True)
         self.load_btn.setText("Promijeni ↗")
         self.unload_btn2.setVisible(True)
+        has_slope = any(getattr(iv, 'slope', None) is not None for iv in workout.intervals)
+        self._grade_frame.setVisible(has_slope)
+        # Invalidate cache da dobijemo svježe zone s cadence_rpm
+        if hasattr(self, '_local_athlete_cache'):
+            del self._local_athlete_cache
+        # Postavi cadence range za prvi interval
+        self._set_cadence_for_current_interval()
         # Makni zlatni rub s Danas tipke
         if self.intervals_today_btn.isEnabled():
             self.intervals_today_btn.setStyleSheet("font-size: 11px;")
@@ -2775,16 +3153,20 @@ class MainWindow(QMainWindow):
         self.cur_int_center_lbl.setText("")
         self.cur_int_detail_center_lbl.setText("")
         self.workout_type_badge.setText("")
+        self.cadence_gauge.set_cadence_range_direct(0, 0)
+        self._cadence_interpolating = False
         self.workout_type_badge.setObjectName("badgeNeutral")
         self.lbl_if.setText("IF: —"); self.lbl_tss.setText("TSS: —")
         self.lbl_cur_int.setText("Interval: —")
         self.total_lbl.setText("—")
         self.interval_bar.set_intervals([], 0)
+        self.time_axis.set_total_duration(0)
         self.interval_dots.set_intervals([])
         self.free_ctrl.setVisible(True)
         self.workout_ctrl.setVisible(False)
         self.load_btn.setText("Učitaj ↗")
         self.unload_btn2.setVisible(False)
+        self._grade_frame.setVisible(False)
         self.chart_widget.clear_workout()
         # otključaj mod gumbe
         self.btn_erg.setEnabled(True)

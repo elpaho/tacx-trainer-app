@@ -45,6 +45,7 @@ class WorkoutInterval:
     type: str = "steadystate"
     slope: float | None = None  # ako nije None → slope mod (%), ignorira power
     text: str = ""              # originalni text tag iz intervals.icu
+    cadence_rpm: int = 0        # preporučena kadenca iz opisa (0 = nije definirana)
 
     def __post_init__(self):
         # ako power_pct_end nije postavljen, kopiramo power_pct
