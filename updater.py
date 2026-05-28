@@ -106,8 +106,12 @@ def download_and_install(on_progress=None) -> bool:
 def restart_app():
     """Restartaj aplikaciju — Windows kompatibilno."""
     python = sys.executable
-    args = sys.argv[:]
-    print(f"[update] Restarting: {python} {args}")
+    script = os.path.abspath(sys.argv[0])
+    print(f"[update] Restarting: {python} {script}")
     import subprocess
-    subprocess.Popen([python] + args)
-    sys.exit(0)
+    # Kratka pauza da se Qt prozori zatvore
+    import time
+    time.sleep(0.5)
+    subprocess.Popen([python, script],
+                     creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0))
+    os._exit(0)

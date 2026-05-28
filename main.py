@@ -39,22 +39,18 @@ def _ask_update(new_version):
     if msg.exec() != QMessageBox.StandardButton.Yes:
         return
 
-    progress = QProgressDialog("Preuzimanje ažuriranja...", None, 0, 100)
+    progress = QProgressDialog("Preuzimanje ažuriranja...", None, 0, 0)
     progress.setWindowTitle("Ažuriranje")
     progress.setWindowModality(Qt.WindowModality.ApplicationModal)
     progress.setMinimumDuration(0)
-    progress.setValue(0)
     progress.show()
 
     def _on_progress(pct):
         def _update():
-            if pct < 0:
-                # Nema Content-Length — indeterminate (0,0)
-                progress.setMaximum(0)
-            else:
-                if progress.maximum() == 0:
-                    progress.setMaximum(100)
+            if pct >= 0:
+                progress.setMaximum(100)
                 progress.setValue(pct)
+            # pct == -1 → indeterminate, ostaje maximum=0
         QTimer.singleShot(0, _update)
 
     def _download():
@@ -66,7 +62,7 @@ def _ask_update(new_version):
         progress.close()
         if ok:
             QMessageBox.information(None, "Ažuriranje završeno",
-                                    "Ažuriranje je uspješno. Aplikacija će se restartati.")
+                                    "Ažuriranje je uspješno installirano.\nAplikacija će se restartati.")
             from updater import restart_app
             restart_app()
         else:
