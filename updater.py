@@ -1,7 +1,5 @@
 """
 Auto-update — provjeri GitHub za novu verziju i ponudi update.
-Koristi raw.githubusercontent.com za provjeru version.py,
-i preuzima dist/tacx_app_latest.zip ako je verzija novija.
 """
 import urllib.request
 import zipfile
@@ -14,12 +12,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-GITHUB_RAW   = "https://raw.githubusercontent.com/elpaho/tacx-trainer-app/main"
-VERSION_URL  = f"{GITHUB_RAW}/version.py"
-ZIP_URL      = f"{GITHUB_RAW}/dist/tacx_app_latest.zip"
-USER_AGENT   = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36")
+GITHUB_RAW  = "https://raw.githubusercontent.com/elpaho/tacx-trainer-app/main"
+VERSION_URL = f"{GITHUB_RAW}/version.py"
+ZIP_URL     = f"{GITHUB_RAW}/dist/tacx_app_latest.zip"
+USER_AGENT  = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/124.0.0.0 Safari/537.36")
 
 
 def _fetch_text(url: str) -> str:
@@ -29,13 +27,11 @@ def _fetch_text(url: str) -> str:
 
 
 def _parse_version(text: str) -> str:
-    """Izvuci VERSION string iz version.py sadržaja."""
     m = re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', text)
     return m.group(1) if m else ""
 
 
 def _version_tuple(v: str) -> tuple:
-    """Pretvori 'v2.09' u (2, 9) za usporedbu."""
     return tuple(int(x) for x in re.findall(r'\d+', v))
 
 
@@ -57,21 +53,15 @@ def check_for_update(current_version: str) -> str | None:
 
 
 def download_and_install(on_progress=None) -> bool:
-    """
-    Preuzmi zip s GitHuba i instaliraj (pregaziti trenutne fajlove).
-    on_progress(pct: int) — opcionalni callback za progress (0-100).
-    Vraća True ako je uspjelo.
-    """
     app_dir = os.path.dirname(os.path.abspath(__file__))
     tmp_zip = os.path.join(tempfile.gettempdir(), "tacx_app_update.zip")
 
     try:
-        # Preuzmi zip
         req = urllib.request.Request(ZIP_URL, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=120) as response:
             total = int(response.headers.get("Content-Length", 0))
             downloaded = 0
-            chunk_size = 8192
+            chunk_size = 65536  # 64KB chunks
             with open(tmp_zip, "wb") as f:
                 while True:
                     chunk = response.read(chunk_size)
@@ -79,16 +69,20 @@ def download_and_install(on_progress=None) -> bool:
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if on_progress and total > 0:
-                        on_progress(int(downloaded / total * 100))
+                    if on_progress:
+                        if total > 0:
+                            on_progress(int(downloaded / total * 100))
+                        else:
+                            # Nema Content-Length — indeterminate, šalji -1
+                            on_progress(-1)
+
+        print(f"[update] Preuzeto {downloaded} bytes, raspakiravam...")
 
         # Raspakiraj — pregaziš sve fajlove osim konfiga
         with zipfile.ZipFile(tmp_zip, "r") as zf:
             for member in zf.namelist():
-                # Preskači lokalni config s API keyevima
                 if member.endswith("intervals_config.json"):
                     continue
-                # Strip prefix foldera (tacx_app/main.py → main.py)
                 parts = member.split("/", 1)
                 if len(parts) < 2 or not parts[1]:
                     continue
@@ -98,10 +92,11 @@ def download_and_install(on_progress=None) -> bool:
                     with zf.open(member) as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst)
 
+        print("[update] Instalacija završena")
         return True
 
     except Exception as e:
-        logger.error(f"Update download greška: {e}")
+        print(f"[update] Download greška: {e}")
         return False
     finally:
         if os.path.exists(tmp_zip):
@@ -109,5 +104,10 @@ def download_and_install(on_progress=None) -> bool:
 
 
 def restart_app():
-    """Restartaj aplikaciju."""
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    """Restartaj aplikaciju — Windows kompatibilno."""
+    python = sys.executable
+    args = sys.argv[:]
+    print(f"[update] Restarting: {python} {args}")
+    import subprocess
+    subprocess.Popen([python] + args)
+    sys.exit(0)

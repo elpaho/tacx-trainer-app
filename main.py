@@ -47,7 +47,15 @@ def _ask_update(new_version):
     progress.show()
 
     def _on_progress(pct):
-        QTimer.singleShot(0, lambda: progress.setValue(pct))
+        def _update():
+            if pct < 0:
+                # Nema Content-Length — indeterminate (0,0)
+                progress.setMaximum(0)
+            else:
+                if progress.maximum() == 0:
+                    progress.setMaximum(100)
+                progress.setValue(pct)
+        QTimer.singleShot(0, _update)
 
     def _download():
         from updater import download_and_install, restart_app
