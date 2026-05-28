@@ -40,19 +40,19 @@ def _version_tuple(v: str) -> tuple:
 
 
 def check_for_update(current_version: str) -> str | None:
-    """
-    Provjeri GitHub za novu verziju.
-    Vraća novu verziju string ako postoji, None ako nema ili greška.
-    """
     try:
+        print(f"[update] Provjeravam... trenutna={current_version}")
         remote_text = _fetch_text(VERSION_URL)
         remote_version = _parse_version(remote_text)
+        print(f"[update] Remote={remote_version}")
         if not remote_version:
             return None
         if _version_tuple(remote_version) > _version_tuple(current_version):
+            print(f"[update] Nova verzija dostupna: {remote_version}")
             return remote_version
+        print("[update] Već najnovija verzija")
     except Exception as e:
-        logger.debug(f"Update provjera nije uspjela: {e}")
+        print(f"[update] Greška: {e}")
     return None
 
 

@@ -6,60 +6,66 @@ import threading
 sys.path.insert(0, os.path.dirname(__file__))
 
 from PyQt6.QtWidgets import QApplication, QMessageBox, QProgressDialog
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QObject, pyqtSignal
 from version import VERSION
 
 
-def check_and_update(app):
-    """Provjeri update u zasebnom threadu, prikaži dialog u Qt threadu."""
-    import threading
-    from updater import check_for_update, download_and_install, restart_app
+class UpdateChecker(QObject):
+    """Qt objekt koji emitira signal iz background threada."""
+    update_available = pyqtSignal(str)
 
-    def _check():
-        new_version = check_for_update(VERSION)
-        if not new_version:
-            return
-        # Prebaci na Qt thread
-        QTimer.singleShot(0, lambda: _ask_update(new_version))
+    def __init__(self):
+        super().__init__()
 
-    def _ask_update(new_version):
-        msg = QMessageBox()
-        msg.setWindowTitle("Dostupno ažuriranje")
-        msg.setText(f"Nova verzija <b>{new_version}</b> je dostupna.\n\nTrenutna verzija: {VERSION}")
-        msg.setInformativeText("Želiš li ažurirati i restartati aplikaciju?")
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        if msg.exec() != QMessageBox.StandardButton.Yes:
-            return
+    def check_in_background(self):
+        def _check():
+            try:
+                from updater import check_for_update
+                new_version = check_for_update(VERSION)
+                if new_version:
+                    self.update_available.emit(new_version)
+            except Exception as e:
+                print(f"[update] Greška pri provjeri: {e}")
+        threading.Thread(target=_check, daemon=True).start()
 
-        # Progress dialog
-        progress = QProgressDialog("Preuzimanje ažuriranja...", None, 0, 100)
-        progress.setWindowTitle("Ažuriranje")
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
 
-        def _on_progress(pct):
-            QTimer.singleShot(0, lambda: progress.setValue(pct))
+def _ask_update(new_version):
+    msg = QMessageBox()
+    msg.setWindowTitle("Dostupno ažuriranje")
+    msg.setText(f"Nova verzija <b>{new_version}</b> je dostupna.\n\nTrenutna verzija: {VERSION}")
+    msg.setInformativeText("Želiš li ažurirati i restartati aplikaciju?")
+    msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+    if msg.exec() != QMessageBox.StandardButton.Yes:
+        return
 
-        def _download():
-            ok = download_and_install(on_progress=_on_progress)
-            QTimer.singleShot(0, lambda: _done(ok))
+    progress = QProgressDialog("Preuzimanje ažuriranja...", None, 0, 100)
+    progress.setWindowTitle("Ažuriranje")
+    progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+    progress.setMinimumDuration(0)
+    progress.setValue(0)
+    progress.show()
 
-        def _done(ok):
-            progress.close()
-            if ok:
-                QMessageBox.information(None, "Ažuriranje završeno",
-                                        "Ažuriranje je uspješno. Aplikacija će se restartati.")
-                restart_app()
-            else:
-                QMessageBox.warning(None, "Greška",
-                                    "Ažuriranje nije uspjelo. Pokušaj ručno preuzeti novu verziju.")
+    def _on_progress(pct):
+        QTimer.singleShot(0, lambda: progress.setValue(pct))
 
-        threading.Thread(target=_download, daemon=True).start()
+    def _download():
+        from updater import download_and_install, restart_app
+        ok = download_and_install(on_progress=_on_progress)
+        QTimer.singleShot(0, lambda: _done(ok))
 
-    threading.Thread(target=_check, daemon=True).start()
+    def _done(ok):
+        progress.close()
+        if ok:
+            QMessageBox.information(None, "Ažuriranje završeno",
+                                    "Ažuriranje je uspješno. Aplikacija će se restartati.")
+            from updater import restart_app
+            restart_app()
+        else:
+            QMessageBox.warning(None, "Greška",
+                                "Ažuriranje nije uspjelo. Pokušaj ručno preuzeti novu verziju.")
+
+    threading.Thread(target=_download, daemon=True).start()
 
 
 def main():
@@ -84,8 +90,13 @@ def main():
     window.resize(1280, 720)
     window.show()
 
-    # Provjeri update 3 sekunde nakon pokretanja — ne blokira startup
-    QTimer.singleShot(3000, lambda: check_and_update(app))
+    # Update checker — signal/slot garantira Qt thread sigurnost
+    checker = UpdateChecker()
+    checker.update_available.connect(_ask_update)
+    QTimer.singleShot(3000, checker.check_in_background)
+
+    # Drži referencu da GC ne uništi checker
+    app._update_checker = checker
 
     ret = app.exec()
     loop.call_soon_threadsafe(loop.stop)

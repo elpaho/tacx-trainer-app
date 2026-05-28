@@ -1933,7 +1933,8 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "_prev_interval_idx") and self._prev_interval_idx != self.player.current_idx:
                     from ble.trainer import ConnectionState as _CS
                     if self._trainer and self._trainer.state == _CS.CONNECTED:
-                                            self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
+                        self._last_interval_avg_power = getattr(self._trainer, "_interval_avg_power", 0)
+                    self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
                     self._evaluate_interval(self._prev_interval_idx)
                     self._interval_elapsed = 0
                     self._play_sound("new_interval")
@@ -1954,6 +1955,13 @@ class MainWindow(QMainWindow):
 
                 # Workout završen — evaluiraj zadnji interval pa stop
                 if was_active and not self.player.is_active:
+                    n = len(self.player.workout.intervals) if self.player.workout else 0
+                    print(f"[eval_last] prev_idx={self._prev_interval_idx} n_intervals={n} "
+                          f"_interval_elapsed={getattr(self,'_interval_elapsed',0)} "
+                          f"_last_interval_elapsed={getattr(self,'_last_interval_elapsed',0)}")
+                    from ble.trainer import ConnectionState as _CS
+                    if self._trainer and self._trainer.state == _CS.CONNECTED:
+                        self._last_interval_avg_power = getattr(self._trainer, "_interval_avg_power", 0)
                     self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
                     self._evaluate_interval(self._prev_interval_idx, force=True)
                     self._last_interval_evaluated = True
@@ -2608,9 +2616,11 @@ class MainWindow(QMainWindow):
         """Evaluiraj odrađeni interval i postavi boju lampice.
         force=True preskače min_time provjeru (za zadnji interval workota)."""
         if not self.player.workout:
+            print(f"[eval] idx={idx} SKIP: no workout")
             return
         ivs = self.player.workout.intervals
         if idx < 0 or idx >= len(ivs):
+            print(f"[eval] idx={idx} SKIP: out of range (len={len(ivs)})")
             return
         iv = ivs[idx]
         ftp = self.player.workout.ftp
@@ -2620,11 +2630,13 @@ class MainWindow(QMainWindow):
             elapsed_in_interval = getattr(self, "_last_interval_elapsed", elapsed_in_interval)
             min_time = max(30, int(iv.duration * 0.50))
             if elapsed_in_interval < min_time:
+                print(f"[eval] idx={idx} SKIP: elapsed={elapsed_in_interval} < min={min_time}")
                 return
 
         target_pct = (iv.power_pct + iv.power_pct_end) / 2 if iv.type in ("ramp", "warmup", "cooldown") else iv.power_pct
         target_w = target_pct * ftp * self.player.intensity_pct / 100
         avg_w = getattr(self, "_last_interval_avg_power", 0)
+        print(f"[eval] idx={idx} '{iv.name}' force={force} target_w={target_w:.0f} avg_w={avg_w:.0f}")
 
         if target_w <= 0 or avg_w <= 0:
             self.interval_dots.set_result(idx, 1)
@@ -2637,6 +2649,7 @@ class MainWindow(QMainWindow):
             result = 1
         else:
             result = 3
+        print(f"[eval] idx={idx} diff={diff_pct:.1f}% → result={result}")
         self.interval_dots.set_result(idx, result)
 
     def _on_blink_tick(self):
@@ -2730,7 +2743,8 @@ class MainWindow(QMainWindow):
                 and not getattr(self, '_last_interval_evaluated', False)):
             from ble.trainer import ConnectionState as _CS
             if self._trainer and self._trainer.state == _CS.CONNECTED:
-                            self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
+                self._last_interval_avg_power = getattr(self._trainer, "_interval_avg_power", 0)
+            self._last_interval_elapsed = getattr(self, "_interval_elapsed", 0)
             self._evaluate_interval(self._prev_interval_idx, force=True)
         self._last_interval_evaluated = False
 
@@ -3245,8 +3259,6 @@ class MainWindow(QMainWindow):
         if self.player.is_active:
             # auto-reset avg kad se interval automatski promijeni
             if self.player._interval_elapsed == 1:
-                # Spremi zadnji avg PRIJE reseta — koristi se za evaluaciju
-                self._last_interval_avg_power = metrics.interval_avg_power or self._last_interval_avg_power
                 self._reset_interval_stats()
             self._update_timebar()
 
