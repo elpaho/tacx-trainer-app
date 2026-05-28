@@ -11,11 +11,9 @@ from version import VERSION
 
 
 class UpdateChecker(QObject):
-    """Qt objekt koji emitira signal iz background threada."""
+    """Qt objekt koji emitira signale iz background threadova — thread-safe."""
     update_available = pyqtSignal(str)
-
-    def __init__(self):
-        super().__init__()
+    download_done    = pyqtSignal(bool)
 
     def check_in_background(self):
         def _check():
@@ -28,8 +26,22 @@ class UpdateChecker(QObject):
                 print(f"[update] Greška pri provjeri: {e}")
         threading.Thread(target=_check, daemon=True).start()
 
+    def download_in_background(self, on_progress):
+        def _dl():
+            try:
+                from updater import download_and_install
+                ok = download_and_install(on_progress=on_progress)
+            except Exception as e:
+                print(f"[update] Greška pri downloadu: {e}")
+                ok = False
+            self.download_done.emit(ok)
+        threading.Thread(target=_dl, daemon=True).start()
+
 
 def _ask_update(new_version):
+    app = QApplication.instance()
+    checker = app._update_checker
+
     msg = QMessageBox()
     msg.setWindowTitle("Dostupno ažuriranje")
     msg.setText(f"Nova verzija <b>{new_version}</b> je dostupna.\n\nTrenutna verzija: {VERSION}")
@@ -46,30 +58,27 @@ def _ask_update(new_version):
     progress.show()
 
     def _on_progress(pct):
-        def _update():
+        def _upd():
             if pct >= 0:
-                progress.setMaximum(100)
+                if progress.maximum() == 0:
+                    progress.setMaximum(100)
                 progress.setValue(pct)
-            # pct == -1 → indeterminate, ostaje maximum=0
-        QTimer.singleShot(0, _update)
-
-    def _download():
-        from updater import download_and_install, restart_app
-        ok = download_and_install(on_progress=_on_progress)
-        QTimer.singleShot(0, lambda: _done(ok))
+        QTimer.singleShot(0, _upd)
 
     def _done(ok):
+        checker.download_done.disconnect(_done)
         progress.close()
         if ok:
             QMessageBox.information(None, "Ažuriranje završeno",
-                                    "Ažuriranje je uspješno installirano.\nAplikacija će se restartati.")
+                                    "Ažuriranje je uspješno instalirano.\nAplikacija će se restartati.")
             from updater import restart_app
             restart_app()
         else:
             QMessageBox.warning(None, "Greška",
                                 "Ažuriranje nije uspjelo. Pokušaj ručno preuzeti novu verziju.")
 
-    threading.Thread(target=_download, daemon=True).start()
+    checker.download_done.connect(_done)
+    checker.download_in_background(_on_progress)
 
 
 def main():
@@ -78,13 +87,8 @@ def main():
     app.setOrganizationName("TacxApp")
 
     loop = asyncio.new_event_loop()
-
-    def run_loop():
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
-
-    t = threading.Thread(target=run_loop, daemon=True)
-    t.start()
+    threading.Thread(target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()),
+                     daemon=True).start()
 
     import builtins
     builtins._asyncio_loop = loop
@@ -94,13 +98,10 @@ def main():
     window.resize(1280, 720)
     window.show()
 
-    # Update checker — signal/slot garantira Qt thread sigurnost
-    checker = UpdateChecker()
-    checker.update_available.connect(_ask_update)
-    QTimer.singleShot(3000, checker.check_in_background)
-
-    # Drži referencu da GC ne uništi checker
-    app._update_checker = checker
+    # Update checker — drži referencu na app da _ask_update može dohvatiti checker
+    app._update_checker = UpdateChecker()
+    app._update_checker.update_available.connect(_ask_update)
+    QTimer.singleShot(3000, app._update_checker.check_in_background)
 
     ret = app.exec()
     loop.call_soon_threadsafe(loop.stop)
