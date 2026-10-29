@@ -96,16 +96,35 @@ def _fetch_all_sync(athlete_id: str, api_key: str) -> tuple[dict, list]:
     if not isinstance(events, list):
         events = []
 
+    # Bicikl sport tipovi — filtriramo trčanje, plivanje i ostalo
+    BIKE_TYPES = {
+        "Ride", "VirtualRide", "MountainBikeRide", "GravelRide",
+        "EBikeRide", "EMountainBikeRide", "Velomobile", "Handcycle",
+    }
+
     # Za svaki event dohvati puni detalj s workout_doc koji sadrži originalne korake i text tagove
     workouts = []
     for e in events:
+        # Filtriraj po sport tipu — preskači ne-bicikl aktivnosti
+        sport = e.get("type") or e.get("sport_type") or e.get("category", "")
+        if sport and sport not in BIKE_TYPES and sport != "WORKOUT":
+            logger.debug(f"Preskačem event tipa '{sport}'")
+            continue
+
         eid = e.get("id")
         if not eid:
             continue
         try:
             detail = _get(f"{BASE_URL}/athlete/{athlete_id}/events/{eid}", api_key)
-            if isinstance(detail, dict) and detail.get("workout_doc"):
-                workouts.append(detail)
+            if isinstance(detail, dict):
+                # Provjeri sport tip i u detaljima
+                detail_sport = detail.get("type") or detail.get("sport_type") or ""
+                if detail_sport and detail_sport not in BIKE_TYPES and detail_sport != "WORKOUT":
+                    continue
+                if detail.get("workout_doc"):
+                    workouts.append(detail)
+                elif e.get("workout_doc"):
+                    workouts.append(e)
             elif e.get("workout_doc"):
                 workouts.append(e)
         except Exception as ex:

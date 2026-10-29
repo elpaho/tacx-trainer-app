@@ -2171,13 +2171,61 @@ class MainWindow(QMainWindow):
             return
         self._show_today_workout_dialog()
 
-    def _show_today_workout_dialog(self):
+    def _show_today_workout_picker(self):
+        """Prikaži izbor treninga kad ima više od jednog za danas."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QFrame
+        workouts = self._intervals_workouts_today
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Odaberi trening za danas")
+        dlg.setMinimumWidth(380)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(8)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        lbl = QLabel(f"Pronađeno {len(workouts)} bicikl treninga za danas:")
+        lbl.setStyleSheet("font-size: 12px; font-weight: 500;")
+        lay.addWidget(lbl)
+
+        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(line)
+
+        for i, w in enumerate(workouts):
+            name = w.get("name") or w.get("workout_name") or f"Trening {i+1}"
+            duration = w.get("moving_time") or w.get("workout_doc", {}).get("duration", 0)
+            mins = f"  ·  {duration // 60} min" if duration else ""
+            desc = w.get("description", "")
+            # Kratki preview opisa
+            preview = ""
+            if desc:
+                first_line = desc.strip().split("\n")[0][:60]
+                preview = f"\n{first_line}..." if len(first_line) >= 60 else f"\n{first_line}"
+
+            btn = QPushButton(f"📅  {name}{mins}{preview}")
+            btn.setStyleSheet("text-align: left; padding: 8px; font-size: 11px;")
+            btn.setMinimumHeight(44)
+            idx = i
+            btn.clicked.connect(lambda _, ix=idx, d=dlg: (d.accept(),
+                                                           self._show_today_workout_dialog(ix)))
+            lay.addWidget(btn)
+
+        lay.addStretch()
+        cancel_btn = QPushButton("Odustani")
+        cancel_btn.clicked.connect(dlg.reject)
+        lay.addWidget(cancel_btn)
+        dlg.exec()
+
+    def _show_today_workout_dialog(self, workout_idx: int = 0):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
         workouts = self._intervals_workouts_today
         if not workouts:
             return
-        # prikazujemo samo prvi trening
-        w = workouts[0]
+
+        # Ako ima više treninga — prikaži izbor
+        if len(workouts) > 1 and workout_idx == 0:
+            self._show_today_workout_picker()
+            return
+
+        w = workouts[workout_idx]
         name = w.get("name") or w.get("workout_name") or "Trening za danas"
         duration = w.get("moving_time") or w.get("workout_doc", {}).get("duration", 0)
         mins = f"{duration // 60} min" if duration else ""
