@@ -304,9 +304,9 @@ class DescriptionParser:
 
     _DUR_RE   = re.compile(r'(\d+(?:\.\d+)?)\s*(s|m|h)(?:\s|$)', re.IGNORECASE)
     _POWER_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(%(?:\s*ftp)?|w\b)', re.IGNORECASE)
-    _RAMP_RE  = re.compile(r'ramp\s+(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)
+    _RAMP_RE  = re.compile(r'ramp\s+(\d+(?:\.\d+)?)\s*%?\s*-\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)
     _RAMP_W_RE = re.compile(r'ramp\s+(\d+)-(\d+)\s*w\b', re.IGNORECASE)
-    _RANGE_RE = re.compile(r'(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)  # npr. 70-74%
+    _RANGE_RE = re.compile(r'(\d+(?:\.\d+)?)\s*%?\s*-\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)  # npr. 70-74%
     _CADENCE_RE = re.compile(r'@?\s*(\d+)(?:-(\d+))?\s*rpm', re.IGNORECASE)  # @85rpm ili @88-92rpm
     _SLOPE_RE = _SLOPE_RE  # reuse global
     _RPT_RE   = re.compile(r'^(?:main\s+set\s+)?(\d+)x\s*$', re.IGNORECASE)
@@ -434,9 +434,8 @@ class DescriptionParser:
             name = self._RANGE_RE.sub('', line)
             name = self._DUR_RE.sub('', name)
             name = self._clean_name(name)
-            _GENERIC = {"steady", "steadystate", "interval", "work", "on", "off",
-                        "recovery", "recover", "rest"}
-            if not name or name.lower() in _GENERIC:
+            # Naziv iz opisa se uvijek poštuje; naziv zone samo ako naziva nema
+            if not name:
                 name = _zone_name(pct)
             return WorkoutInterval(
                 name=name,
@@ -460,10 +459,8 @@ class DescriptionParser:
         name = self._POWER_RE.sub('', name)
         name = self._clean_name(name)
 
-        # Normaliziraj generičke nazive iz intervals.icu exporta
-        _GENERIC = {"steady", "steadystate", "interval", "work", "on", "off",
-                    "recovery", "recover", "rest"}
-        if name.lower() in _GENERIC or not name:
+        # Naziv iz opisa se uvijek poštuje; naziv zone samo ako naziva nema
+        if not name:
             name = _zone_name(pct)
 
         return WorkoutInterval(
