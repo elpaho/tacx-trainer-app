@@ -195,6 +195,7 @@ class IntervalBar(QWidget):
         self.intervals = intervals
         self.current_idx = current_idx
         self._progress = 0.0
+        self._ftp_fn = None            # postavlja MainWindow — vraća aktualni referentni FTP
         self.setMinimumHeight(40)
         self.setMouseTracking(True)
 
@@ -411,15 +412,14 @@ class IntervalBar(QWidget):
             self.setToolTip("")
             return
         iv = self.intervals[idx]
-        ftp = getattr(iv, "_ftp_ref", None)
 
         dur_m = iv.duration // 60
         dur_s = iv.duration % 60
         dur_str = f"{dur_m}m {dur_s:02}s" if dur_m else f"{dur_s}s"
 
-        # Dohvati FTP — workout > intervals.icu profil > fallback 220
+        # Dohvati FTP — isti referentni FTP kao ostatak aplikacije (workout > profil)
         try:
-            ftp = self.parent()._intervals_ftp()
+            ftp = int(self._ftp_fn()) if self._ftp_fn else 220
         except Exception:
             ftp = 220
 
@@ -1581,6 +1581,7 @@ class MainWindow(QMainWindow):
         wo_layout.addLayout(wo_top)
 
         self.interval_bar = IntervalBar([])
+        self.interval_bar._ftp_fn = self._intervals_ftp
         self.interval_bar.clicked.connect(self._on_interval_clicked)
         wo_layout.addWidget(self.interval_bar, stretch=1)
 
